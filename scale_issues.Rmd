@@ -1,0 +1,230 @@
+---
+title: "A bag of tips and tricks for dealing with scale issues"
+author: "Camelia Simoiu and Jim Savage"
+date: "6 November 2016"
+output: html_document
+---
+
+Often when building models we come across _scale issues_. Some common examples: 
+
+- Some columns of our data might be different orders of magnitude to others, for instance gender might be 
+encoded as a binary variable, while income might be stored in whole-dollar amounts. 
+- An outcome might be extremely rare. Or
+- The impact of variable X1 on Y could be orders of magnitude greater than the impact of variable X2. That is, 
+it's not the scale of the _data_ that is causing issues so much as the scale of the _parameters_. 
+
+Scale issues like these can have a big impact on the quality of your model fit, both in terms of 
+the computational efficiency of fitting the model, and the quality of the estimates/predictions
+coming from the model. They also impact the interpretability of estimates from the model. It's extremely 
+difficult for non-technical consumers of model output to interpret regression output when the variation 
+in your features are different orders of magnitude. 
+
+Below are a few tricks that we often use to deal with scale problems.
+
+### Understanding why scale causes problems
+
+Aside from interpretability, which scale quite obviously affects, big differences in scale 
+affects computation for many model types (though not tree-based methods). Take for example
+the diamond dataset, which comes packaged with R. We'll use the last 10,000 rows, which contain
+the most costly diamonds that are likely to give us scale issues. Let's build a very simple mixed model
+that tries to predict the weight of the diamond given its characteristics. (This is a near useless 
+thing to model, but does give us the numerical problems we're after.)
+
+```{r}
+# Load lme4 and the data
+library(lme4)
+data("diamonds", package = "ggplot2")
+
+# Grab the priciest diamonds
+diamonds_subset <- diamonds[(nrow(diamonds)-10000):nrow(diamonds),]
+# Fit the model
+fit_1 <- lmer(carat ~ depth + table + price + x + y + z + (1 + price | cut), data = diamonds_subset)
+```
+
+As you can see, it throws all sorts of warnings to tell us that the model has not converged. If this 
+is the case, we should not trust the results from the model fit. If the scale issue is big enough, 
+it will throw an error and not return anything at all. Helpfully, the `lme4` package recognises scale
+problems and tells us to rescale our values. Let's try rescaling and see what happens. 
+
+```{r}
+# Let's try dividing price by 1000
+fit_2 <- lmer(carat ~ depth + table + I(price/1000) + x + y + z + (1 + I(price/1000) | cut), data = diamonds_subset)
+
+# Now let's try taking the natural log
+fit_3 <- lmer(carat ~ depth + table + log(price) + x + y + z + (1 + log(price) | cut), data = diamonds_subset)
+```
+
+### Hey presto! The model converges. Why does this work? 
+
+There are two common operations used to fit models like this (sometimes both at the same time): optimization and matrix
+inversion. 
+
+Numerical optimization works by varying a set of parameters until it finds a minimum value to some loss function---such 
+as a (negative) log likelihood, or a measure of impurity like entropy. To find a minimum point, most optimization methods
+evaluate the gradient of the loss function around the current values of the parameters; it it is less than a threshold, 
+the optimizer stops. You can think of this as taking a marble, dipping it in molasses, and rolling it into a soup bowl.
+
+![Optimization is just rolling a marble into a bowl of soup](soup_bowl.jpg)
+
+When we have a scaling problem, the soup bowl gets stretched out, making the gradient of the loss function extremely shallow. 
+Imagine we drop our sticky marble into this bowl: it probably won't make it to the bottom. 
+![A sticky marble won't make it to the bottom of this bowl](soup_bowl_stretched.png)
+
+We get a similar problem in trying to invert matrices with different orders of magnitude. 
+
+```{r}
+# a positive definite matrix
+a <- matrix(c(1, 0.5, 0.5, 1), 2, 2)
+# Easy to invert
+solve(a)
+b <- a
+diag(b) <- diag(b)*1e3
+solve(b)
+# We only increased the scale by three orders of magnitude, yet the 
+# off-diagonals have gone to zero far more quickly
+# you can see where this is going
+
+# Let's make a big positive definite matrix
+c <- rWishart(1, 12, diag(10))[,,1]
+# and scale one of its diagonal elements by 1e5
+c[4,4] <- c[4,4]*1e15
+try(solve(c), silent = F)
+# Ruh Roh
+```
+
+How common is this situation? Take linear regression where we have one column of our $X$ matrix being in the billions
+and everything else in of order of magnitude 1. In the normal equations we use $(X'X)^{-1}$---the diagonal elements of $X'X$
+are the sums of squares of the columns of X. If one of the columns of X is large in absolute value relative to the others, 
+you will get these sorts of scale issues. 
+
+### But I'm a Bayesian and I'm sampling from the posterior, not optimizing. Does this still matter?
+
+Yes!
+
+- Ideally, all our priors would be something like N(0, 1), or at least all of order of magnitude 1. If we have 
+priors of this scale but a likelihood a long way away, your Markov chains will take a long time to converge (or might not
+ever converge). 
+- If, due to scale, the surface of the posterior is extremely flat (as happens when we "stretch" the posterior with a 
+scale problem), the gradients used to guide HMC might suffer numerical errors, leading to "divergent transitions". Divergent
+transitions are basically the worst thing that can happen when estimating a model by HMC---they mean that we're not 
+properly exploring the posterior distribution. 
+- Hamiltonian Monte Carlo send a particle (our parameter vector) whizzing around the posterior surface. In order to 
+make sure it covers the parameter space, it requires a well-chosen covariance matrix for the momentum of this particle. 
+The beautiful thing about Stan is that it tunes this covariance matrix during warm-up. But scale issues make choosing 
+this matrix more difficult, which will result in poor sampling performance. 
+
+## Dealing with scale problems
+
+Here are a few
+
+### Use the QR decomposition
+
+### Take logs
+
+### Divide (and conquer!)
+
+### Free scale parameters
+
+
+Suppose that we are interested in estimating the proportion of a rare disease in the population, say Y.  If we try to model Y directly, we would need a prior that is heavily skewed towards 0. As a first approximation, we might think about
+
+
+              	Y ~ beta(1, 10000)
+
+
+                            
+
+
+This is tempting, however we will likely run into a number of issues:
+
+
+Computational instability.  beta(1, 10000) is unstable and may cause numerical instabilities and divergent transitions.
+Difficulties in interpreting effects / coefficient values.  If we are not sure whether an effect exists, it is much more difficult to interpret its magnitude on the scale of 0.0001 versus on a scale of [0, 1]. 
+
+
+
+
+How to model this ?
+
+
+Method 1 
+
+
+A naive approach would be to rescale the data to calculate the rate per 10,000 people. However If we make transformations to the data, it's important not to implicitly be informing the prior with data. For instance, it would be incorrect to set the prior to the value inferred from the posterior (see 
+ http://andrewgelman.com/2016/03/25/28321/)
+
+
+
+
+
+
+Method 2
+
+
+Another approach is to scale the parameters so that they are “scale-free”, or alternatively, “unit scaled”. This is in the same spirit as scaling covariates that have different units in, say, a regression: If one covariate is house price and the other is age, the house price will have a much larger impact on the response variable due purely to its scale.  
+
+
+Once we’ve identified the appropriate units of the problem, we can then re-define our system of units so that all of the expected effects are all around 1 or between 0-1 in those units. Scale-free parameters  (not transformed parameters) should typically (although not necessarily) be in the (0, 1) range in absolute value. This suggests that N(0,1) could be a good candidate for a weakly informative prior.  
+
+
+This approach has a number of advantages:
+
+
+1) Computational reasons
+
+
+beta(1, 10000) is unstable. We want to design the model such that the geometry of the posterior is easy for HMC to navigate. As a general rule, we’d like to avoid extremely large or extremely small parameters such as .000001 or 100000.  If the effect varies on the order of 104 in one direction and 10-4 in the other, then it will take 108 steps to explore the entire state space which may be both intractable and cause numerical instabilities. If everything is of order 1, however, then it will take order 1 steps to jump to a new point, allowing stan to explore the state space much more efficiently.
+
+
+2) Interpretability 
+
+
+Depending on the context, interpreting parameter estimates may be difficult if parameters are on completely different scales. For example, a coefficient for parameters whose value ranges in the order of thousands, with one whose value ranges between (0,1) would not be directly comparable.
+
+
+3) Setting “good priors”
+
+
+[Assume X is another parameter in the model]. We set an informative prior on X as we are not sure whether an effect exists. If it does, we will have some idea of its scale. Ultimately these manifest as priors of the form
+
+
+x_scale ~ half_cauchy(0,5)
+
+
+x ~ normal(0, x_scale);
+
+
+If all of the scales are order 1, then all priors will look the same and we have much less bookkeeping to do.
+
+
+Informative Priors
+
+
+Now say we have good reason to believe the average effect of X is expected to be 4.5. We would be tempted to set a weak informative prior, say, 
+
+
+					X ~ normal(4.5, 1)
+
+
+A better solution would be to transform X into a scale-free parameter by scaling by the value it typically takes, in this case, 4.5. So instead of X ~ normal(4.5, 1), we want to work with log(X/4.5), or X/4.5. Incorporating this knowledge into the model turns the weakly informative prior into something much more informative. 
+
+
+Alternatively, we can use a multiplicative factor and specify X as a transformed parameter:
+
+
+transformed_parameters {
+    X <- 4.5 + X_raw;
+}
+model {
+   X_raw ~ normal(0,1)
+}
+
+
+
+
+Final Checks
+
+
+Finally, although we may believe our knowledge is accurate, we still need to verify that the fit is good and the prior mean doesn’t create tension with the rest of the model. For instance, we check that that all other parameters depending on this transformation make sense, and parameter limits are still valid.
+
+
